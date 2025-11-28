@@ -1,0 +1,15 @@
+[
+  {
+    "id": 1,
+    "name": "Hades",
+    "year": 2020,
+    "platforms": ["PC", "PlayStation", "Xbox", "Nintendo Switch"],
+    "main_genre": "Action Roguelike",
+    "perspective": "Isometric",
+    "multiplayer": false,
+    "co_op": false,
+    "online_only": false,
+    "age_rating": "16+",
+    "score_bucket": "90+"
+  }
+]

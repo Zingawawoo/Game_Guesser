@@ -1,35 +1,45 @@
-// frontend/src/types.ts
+// src/types.ts
 
-export type Game = {
+// Game state phases
+export type Phase = "intro" | "selectingMystery" | "playing" | "finished";
+
+// Yes / No answers
+export type Answer = "yes" | "no";
+
+// Basic game info (we can extend this when we hook RAWG / backend)
+export interface GameSummary {
   id: number;
   name: string;
-  year: number;
-  platforms: string[];
-  genres: string[];
-  main_genre: string;
-  perspective: string;
-  world_type: string;
-  camera: string;
-  theme: string;
-  tone: string[];
-  difficulty: string;
-  replayability: string;
-  developer_bucket: string;
-  developer_region: string;
-  franchise: string;
-  franchise_entry: string;
-  esrb: string;
-  age_rating: string;
-  violence_level: string;
-  visual_style: string[];
-  combat_style: string[];
-  structure_features: string[];
-  mood: string[];
-  setting: string[];
-  monetization: string[];
-  multiplayer: boolean;
-  co_op: boolean;
-  online_only: boolean;
-  multiplayer_mode: string;
-  score_bucket: string;
-};
+  imageUrl?: string; // optional for now
+}
+
+// Single question history entry
+export interface QuestionHistoryEntry {
+  id: number;
+  text: string;
+  answer: Answer;
+  timestamp: string;
+  questionTypeId: string; 
+}
+
+// Configuration for a question type
+export interface QuestionTypeDef {
+  id: string;
+  label: string;
+  hint: string;
+  options: string[];
+}
+
+export interface MysteryGame {
+    id: number;
+    name: string;
+    imageUrl: string;
+}
+
+export interface StartResponse {
+    sessionId: string;
+    datasetSize: number;
+    candidatesCount: number;
+    maxQuestions: number;
+    mysteryGame: MysteryGame; 
+}

@@ -1,140 +1,404 @@
-import React, { useEffect, useState } from "react";
-import { motion } from "framer-motion";
+import React, { useEffect, useMemo, useState } from "react";
 import "./index.css";
-import type { Game } from "./types";
+
+import type {
+  Answer,
+  GameSummary,
+  Phase,
+  QuestionHistoryEntry,
+  QuestionTypeDef,
+} from "./types";
+
+import QuestionBuilder from "./components/QuestionBuilder";
+import HistoryPanel from "./components/HistoryPanel";
+import MysteryPanel from "./components/MysteryPanel";
+
+const QUESTION_TYPES: QuestionTypeDef[] = [
+  {
+    id: "platform",
+    label: "Platform",
+    hint: "Ask which platform the game released on.",
+    options: ["PC", "PlayStation", "Xbox", "Nintendo Switch", "Multi-platform"],
+  },
+  {
+    id: "genre",
+    label: "Main Genre",
+    hint: "Narrow it down by core genre.",
+    options: ["Action", "RPG", "Shooter", "Platformer", "Sports", "Strategy"],
+  },
+  {
+    id: "perspective",
+    label: "Perspective",
+    hint: "First-person vs third-person etc.",
+    options: ["First-person", "Third-person", "Top-down", "Side-view"],
+  },
+  {
+    id: "world",
+    label: "World Type",
+    hint: "Open world vs more linear.",
+    options: ["Open world", "Linear", "Level-based", "Hub-based"],
+  },
+  {
+    id: "multiplayer",
+    label: "Multiplayer",
+    hint: "Check if it has online or local multiplayer.",
+    options: ["Single-player", "Online multiplayer", "Local co-op"],
+  },
+  {
+    id: "rating",
+    label: "Age Rating",
+    hint: "Roughly how mature the game is.",
+    options: ["Everyone", "Teen", "Mature"],
+  },
+  {
+    id: "style",
+    label: "Visual Style",
+    hint: "Realistic vs stylised, pixel art, etc.",
+    options: ["Realistic", "Stylised", "Pixel art", "Cartoon"],
+  },
+  {
+    id: "theme",
+    label: "Theme",
+    hint: "Fantasy, sci-fi, sports, horror…",
+    options: ["Fantasy", "Sci-fi", "Horror", "Sports", "Historical"],
+  },
+];
+
 
 const App: React.FC = () => {
-  const [games, setGames] = useState<Game[]>([]);
-  const [loading, setLoading] = useState<boolean>(true);
-  const [error, setError] = useState<string>("");
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [phase, setPhase] = useState<Phase>("intro");
 
+  const [allGames, setAllGames] = useState<GameSummary[]>([]);
+  const [mysteryGame, setMysteryGame] = useState<GameSummary | null>(null);
+  const [candidatesCount, setCandidatesCount] = useState<number>(0);
+
+  const [questionTypeId, setQuestionTypeId] = useState<string>("");
+  const [selectedOption, setSelectedOption] = useState<string>("");
+
+  const [history, setHistory] = useState<QuestionHistoryEntry[]>([]);
+  const [lastAnswer, setLastAnswer] = useState<Answer | null>(null);
+  const [showAnswerFlash, setShowAnswerFlash] = useState<boolean>(false);
+
+  const [guessInput, setGuessInput] = useState<string>("");
+  const [guessSuggestions, setGuessSuggestions] = useState<GameSummary[]>([]);
+  const [hasGuessedCorrectly, setHasGuessedCorrectly] = useState<boolean>(false);
+  const [maxQuestions, setMaxQuestions] = useState<number | null>(null);
+  const questionsAsked: number = history.length;
+
+  // ---------- Load dataset (front-end only for now) ----------
   useEffect(() => {
     async function loadGames(): Promise<void> {
       try {
-        const res = await fetch("/games.json");
-        if (!res.ok) {
-          setError("Failed to load games.json");
-          setLoading(false);
-          return;
-        }
+        const response: Response = await fetch("/games.json");
+        const data: { id: number; name: string }[] =
+          await response.json();
 
-        const data = (await res.json()) as Game[];
-        setGames(data);
-        setLoading(false);
-      } catch {
-        setError("Error while loading games.json");
-        setLoading(false);
+        const mapped: GameSummary[] = data.map(
+          (raw: { id: number; name: string }, index: number): GameSummary => {
+            return {
+              id: raw.id ?? index,
+              name: raw.name,
+            };
+          }
+        );
+
+        setAllGames(mapped);
+        setCandidatesCount(mapped.length);
+      } catch (error) {
+        setAllGames([]);
+        setCandidatesCount(0);
+        // eslint-disable-next-line no-console
+        console.error("Failed to load games.json", error);
       }
     }
 
     loadGames();
   }, []);
 
-  if (loading) {
-    return (
-      <div className="flex h-screen w-screen items-center justify-center bg-slate-950 text-slate-100">
-        <div className="rounded-2xl bg-slate-900 px-6 py-4 text-sm shadow-xl shadow-emerald-500/20">
-          Loading game dataset…
-        </div>
-      </div>
-    );
-  }
+  // ---------- Guess suggestions ----------
+  useEffect(() => {
+    if (guessInput.trim().length === 0) {
+      setGuessSuggestions([]);
+      return;
+    }
 
-  if (error !== "") {
-    return (
-      <div className="flex h-screen w-screen items-center justify-center bg-slate-950 text-slate-100">
-        <div className="rounded-2xl bg-rose-900/40 px-6 py-4 text-sm shadow-xl shadow-rose-500/30">
-          {error}
-        </div>
-      </div>
-    );
-  }
+    const query: string = guessInput.toLowerCase();
 
+    const filtered: GameSummary[] = allGames
+      .filter((game: GameSummary): boolean => {
+        const nameLower: string = game.name.toLowerCase();
+        return nameLower.includes(query);
+      })
+      .slice(0, 8);
+
+    setGuessSuggestions(filtered);
+  }, [guessInput, allGames]);
+
+  const currentQuestionType: QuestionTypeDef | undefined = useMemo(() => {
+    const found: QuestionTypeDef | undefined = QUESTION_TYPES.find(
+      (q: QuestionTypeDef): boolean => {
+        return q.id === questionTypeId;
+      }
+    );
+    return found;
+  }, [questionTypeId]);
+
+  // ---------- Load or restore the mystery image once a session exists ----------
+  useEffect(() => {
+    if (!sessionId) return;
+
+    fetch(`/api/session/${encodeURIComponent(sessionId)}/mystery`, {
+      method: "POST",
+    })
+      .then(res => res.json())
+      .then(data => {
+        setMysteryGame(data);
+      })
+      .catch(err => console.error("Failed to load mystery info", err));
+  }, [sessionId]);
+
+  // ---------- Start flow ----------
+  const handleStartGame = async (): Promise<void> => {
+    if (phase === "selectingMystery") return;
+
+    setPhase("selectingMystery");
+
+    try {
+      const response = await fetch("/api/session/start", {
+        method: "POST",
+      });
+
+      if (!response.ok) throw new Error("Failed to start session");
+
+      const data = await response.json();
+
+      setSessionId(data.sessionId);
+      setCandidatesCount(data.candidatesCount);
+      setMaxQuestions(data.maxQuestions);
+      setMysteryGame(data.mysteryGame);
+
+      // Allow lottery animation to play
+      setTimeout(() => {
+        setPhase("playing");
+      }, 1800);
+
+    } catch (err) {
+      console.error(err);
+      setPhase("intro");
+    }
+  };
+
+  const handlePlayAgain = (): void => {
+    setHistory([]);
+    setQuestionTypeId("");
+    setSelectedOption("");
+    setGuessInput("");
+    setGuessSuggestions([]);
+    setHasGuessedCorrectly(false);
+    setLastAnswer(null);
+    setShowAnswerFlash(false);
+
+    if (allGames.length > 0) {
+      setCandidatesCount(allGames.length);
+    }
+
+    setPhase("intro");
+  };
+
+  // ---------- Ask a question (simulated yes/no for now) ----------
+  const handleAskQuestion = async (): Promise<void> => {
+    if (currentQuestionType === undefined) {
+      return;
+    }
+    if (selectedOption.trim().length === 0) {
+      return;
+    }
+    if (phase !== "playing") {
+      return;
+    }
+    if (sessionId === null) {
+      return;
+    }
+
+    const questionText: string =
+      "Is the " +
+      currentQuestionType.label.toLowerCase() +
+      " " +
+      selectedOption +
+      "?";
+
+    try {
+      const response: Response = await fetch(
+        "/api/session/" + encodeURIComponent(sessionId) + "/ask",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            questionTypeId: currentQuestionType.id,
+            option: selectedOption,
+          }),
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error("Ask question failed");
+      }
+
+      const data: { answer: Answer; candidatesCount: number } =
+        await response.json();
+
+      const entry: QuestionHistoryEntry = {
+        id: history.length + 1,
+        text: questionText,
+        answer: data.answer,
+        timestamp: new Date().toLocaleTimeString(),
+        questionTypeId: currentQuestionType.id,   // ADD THIS
+      };
+
+
+      const newHistory: QuestionHistoryEntry[] = [...history, entry];
+      setHistory(newHistory);
+      setCandidatesCount(data.candidatesCount);
+
+      setLastAnswer(data.answer);
+      setShowAnswerFlash(true);
+      window.setTimeout((): void => {
+        setShowAnswerFlash(false);
+      }, 800);
+    } catch (error) {
+      // eslint-disable-next-line no-console
+      console.error(error);
+    }
+  };
+
+  // ---------- Guessing ----------
+  const handleUseSuggestion = (game: GameSummary): void => {
+    setGuessInput(game.name);
+    setGuessSuggestions([]);
+  };
+
+  const handleGuessSubmit = async (): Promise<void> => {
+    if (sessionId === null) {
+      return;
+    }
+    if (guessInput.trim().length === 0) {
+      return;
+    }
+
+    try {
+      const response: Response = await fetch(
+        "/api/session/" + encodeURIComponent(sessionId) + "/guess",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ guess: guessInput }),
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error("Guess submit failed");
+      }
+
+      const data: {
+        correct: boolean;
+        game: GameSummary;
+      } = await response.json();
+
+      setMysteryGame(data.game);
+      setHasGuessedCorrectly(data.correct);
+      setPhase("finished");
+    } catch (error) {
+      // eslint-disable-next-line no-console
+      console.error(error);
+    }
+  };
+
+  // ---------- Render ----------
   return (
-    <div className="flex h-screen w-screen flex-col bg-slate-950 text-slate-50">
+    <div className="min-h-screen bg-slate-950 text-slate-50 flex flex-col">
       {/* Top bar */}
-      <header className="flex items-center justify-between border-b border-slate-800 px-6 py-3">
-        <div className="flex items-center gap-2">
-          <div className="h-8 w-8 rounded-xl bg-emerald-500/10 ring-2 ring-emerald-400/80" />
-          <div className="flex flex-col">
-            <span className="text-xs uppercase tracking-[0.2em] text-slate-400">
+      <header className="flex items-center justify-between px-6 py-4 border-b border-slate-800/80 bg-slate-950/70 backdrop-blur-md">
+        <div className="flex items-center gap-3">
+          <div className="h-8 w-8 rounded-2xl bg-gradient-to-br from-emerald-400 to-cyan-500 flex items-center justify-center shadow-lg shadow-emerald-500/30">
+            <div className="h-4 w-4 rounded-xl border border-white/60" />
+          </div>
+          <div>
+            <h1 className="text-sm font-semibold tracking-wide text-slate-100">
               GDD GUESSER
-            </span>
-            <span className="text-sm text-slate-100">
+            </h1>
+            <p className="text-xs text-slate-400">
               Video Game Question Game
-            </span>
+            </p>
           </div>
         </div>
-        <div className="text-xs text-slate-400">
-          Dataset size:{" "}
-          <span className="font-semibold text-emerald-300">
-            {games.length} games
-          </span>
+
+        <div className="flex items-center gap-6 text-xs text-slate-400">
+          <div className="hidden md:flex items-baseline gap-2">
+            <span className="uppercase tracking-wide text-slate-500">
+              Dataset size
+            </span>
+            <span className="font-semibold text-emerald-300">
+              {allGames.length}
+            </span>
+            <span className="text-slate-600">games</span>
+          </div>
+          <button
+            type="button"
+            onClick={handlePlayAgain}
+            className="rounded-full border border-slate-700/80 bg-slate-900/80 px-3 py-1.5 text-[11px] font-medium tracking-wide uppercase text-slate-300 hover:border-emerald-400 hover:text-emerald-200 transition-colors"
+          >
+            New Game
+          </button>
         </div>
       </header>
 
       {/* Main layout */}
-      <main className="flex flex-1 gap-4 px-4 py-4">
-        {/* Left: future Question Builder */}
-        <section className="flex w-1/3 flex-col rounded-2xl bg-slate-900/80 p-4">
-          <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">
-            Question Builder
-          </h2>
-          <p className="text-xs text-slate-400">
-            This panel will let you pick categories and yes/no questions to ask.
-            We will wire this up to the backend question templates next.
-          </p>
-        </section>
+      <main className="flex-1 grid grid-cols-1 lg:grid-cols-[minmax(0,1.25fr)_minmax(0,1.1fr)_minmax(0,1.25fr)] gap-4 lg:gap-6 px-3 lg:px-6 py-4 lg:py-6">
+        <QuestionBuilder
+          phase={phase}
+          questionTypes={QUESTION_TYPES}
+          currentQuestionTypeId={questionTypeId}
+          selectedOption={selectedOption}
+          history={history}
+          onQuestionTypeChange={(id: string): void => {
+            setQuestionTypeId(id);
+            setSelectedOption("");
+          }}
+          onOptionChange={(opt: string): void => {
+            setSelectedOption(opt);
+          }}
+          onAskQuestion={handleAskQuestion}
+        />
 
-        {/* Center: Mystery game card */}
-        <section className="flex w-1/3 items-center justify-center">
-          <motion.div
-            initial={{ scale: 0.9, opacity: 0.0 }}
-            animate={{ scale: 1.0, opacity: 1.0 }}
-            transition={{ duration: 0.3 }}
-            className="flex w-full flex-col items-center rounded-3xl bg-gradient-to-br from-slate-800 to-slate-900 p-6 shadow-2xl shadow-emerald-500/20"
-          >
-            <div className="mb-3 text-xs uppercase tracking-[0.2em] text-slate-400">
-              Mystery Game
-            </div>
-            <div className="mb-4 flex h-20 w-20 items-center justify-center rounded-3xl bg-slate-950 shadow-inner shadow-black/60">
-              <span className="text-4xl font-black text-emerald-400">?</span>
-            </div>
-            <div className="text-center text-sm text-slate-300">
-              Ask yes/no questions to narrow down{" "}
-              <span className="font-semibold text-emerald-300">
-                {games.length}
-              </span>{" "}
-              modern games until you can guess the right one.
-            </div>
-            <div className="mt-4 text-xs text-slate-400">
-              Next step: connect to the Go backend and wire up live sessions.
-            </div>
-          </motion.div>
-        </section>
+        <MysteryPanel
+          phase={phase}
+          allGames={allGames}
+          candidatesCount={candidatesCount}
+          mysteryGame={mysteryGame}
+          lastAnswer={lastAnswer}
+          showAnswerFlash={showAnswerFlash}
+          hasGuessedCorrectly={hasGuessedCorrectly}
+          guessInput={guessInput}
+          maxQuestions={maxQuestions}
+          questionsAsked={questionsAsked}
+          onStartGame={handleStartGame}
+          onPlayAgain={handlePlayAgain}
+        />
 
-        {/* Right: future History + Guess */}
-        <section className="flex w-1/3 flex-col rounded-2xl bg-slate-900/80 p-4">
-          <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">
-            Questions &amp; Guesses
-          </h2>
-          <p className="mb-3 text-xs text-slate-400">
-            This panel will show question history and let you submit your final guess.
-          </p>
-          <div className="mt-auto">
-            <input
-              className="mb-2 w-full rounded-lg bg-slate-800 px-3 py-2 text-xs outline-none focus:ring-2 focus:ring-emerald-400"
-              placeholder="I think the game is…"
-              disabled
-            />
-            <button
-              className="w-full cursor-not-allowed rounded-lg bg-slate-700 py-2 text-xs font-semibold text-slate-400"
-              disabled
-            >
-              Guess (backend not wired yet)
-            </button>
-          </div>
-        </section>
+        <HistoryPanel
+          history={history}
+          guessInput={guessInput}
+          suggestions={guessSuggestions}
+          phase={phase}
+          onGuessInputChange={setGuessInput}
+          onUseSuggestion={handleUseSuggestion}
+          onGuessSubmit={handleGuessSubmit}
+        />
       </main>
     </div>
   );

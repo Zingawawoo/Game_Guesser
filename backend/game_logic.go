@@ -1,177 +1,98 @@
-package backend
+package guesser
 
 import (
 	"math/rand"
 )
 
-type AskedQuestion struct {
-	TemplateID string `json:"template_id"`
-	Label      string `json:"label"`
-	Value      string `json:"value"`
-	Answer     bool   `json:"answer"`
-}
+// -----------------------------
+// Session creation
+// -----------------------------
 
-type SessionState struct {
-	SecretID       int             `json:"secret_id"`        // only for debugging; do not send to client in production
-	RemainingIDs   []int           `json:"remaining_ids"`    // still possible games
-	Asked          []AskedQuestion `json:"asked"`            // question history
-	GuessesLeft    int             `json:"guesses_left"`
-	Status         string          `json:"status"`           // "playing", "won", "lost"
-	RevealGameName string          `json:"reveal_game_name"` // filled when won/lost
-}
-
-type GameIndex struct {
-	ByID map[int]Game
-}
-
-func NewGameIndex(games []Game) GameIndex {
-	index := GameIndex{
-		ByID: make(map[int]Game),
-	}
-
-	for _, g := range games {
-		index.ByID[g.ID] = g
-	}
-
-	return index
-}
-
-
-func NewSession(games []Game) SessionState {
-	remaining := make([]int, 0)
-	for _, g := range games {
-		remaining = append(remaining, g.ID)
-	}
-
-	secretIndex := rand.Intn(len(remaining))
-	secretID := remaining[secretIndex]
-
-	state := SessionState{
-		SecretID:       secretID,
-		RemainingIDs:   remaining,
-		Asked:          []AskedQuestion{},
-		GuessesLeft:    10,         // tune this
-		Status:         "playing",  // "playing", "won", "lost"
-		RevealGameName: "",
-	}
-
-	return state
-}
-
-
-func findTemplateByID(templates []QuestionTemplate, id string) (QuestionTemplate, bool) {
-	for _, t := range templates {
-		if t.ID == id {
-			return t, true
+// NewSessionState picks a random secret game and initial candidate list.
+func NewSessionState(idx GameIndex) SessionState {
+	if len(idx.AllGameIDs) == 0 {
+		// Edge case: no games at all.
+		return SessionState{
+			RemainingIDs: []int{},
+			SecretID:     0,
 		}
 	}
-	return QuestionTemplate{}, false
+
+	secretID := idx.AllGameIDs[rand.Intn(len(idx.AllGameIDs))]
+
+	remaining := make([]int, len(idx.AllGameIDs))
+	copy(remaining, idx.AllGameIDs)
+
+	return SessionState{
+		RemainingIDs: remaining,
+		SecretID:     secretID,
+	}
 }
 
-func FindGameByID(idx GameIndex, id int) (Game, bool) {
-	g, ok := idx.ByID[id]
-	return g, ok
-}
+// -----------------------------
+// Apply single question
+// -----------------------------
 
+// ApplyQuestion answers the question for the secret game and then
+// filters the candidate list to only games that would give the same answer.
 func ApplyQuestion(
 	state SessionState,
-	templates []QuestionTemplate,
+	template QuestionTemplate,
 	idx GameIndex,
-	req QuestionRequest,
-) SessionState {
-	if state.Status != "playing" {
-		return state
-	}
+	value string,
+) (SessionState, bool) {
+	secretGame := idx.Games[state.SecretID]
 
-	tmpl, ok := findTemplateByID(templates, req.TemplateID)
-	if !ok {
-		return state
-	}
+	var answer bool
 
-	secretGame, ok := FindGameByID(idx, state.SecretID)
-	if !ok {
-		return state
-	}
-
-	answer := EvaluateQuestion(secretGame, tmpl, req.Value)
-
-	// filter remaining IDs to those that would give the same answer
-	newRemaining := make([]int, 0)
-	for _, id := range state.RemainingIDs {
-		g, okGame := FindGameByID(idx, id)
-		if !okGame {
-			continue
-		}
-
-		gameAnswer := EvaluateQuestion(g, tmpl, req.Value)
-		if gameAnswer == answer {
-			newRemaining = append(newRemaining, id)
-		}
-	}
-
-	askedLabel := tmpl.Label
-	// front-end will substitute {value}, but you can store raw + value for now
-
-	newAsked := AskedQuestion{
-		TemplateID: tmpl.ID,
-		Label:      askedLabel,
-		Value:      req.Value,
-		Answer:     answer,
-	}
-
-	state.RemainingIDs = newRemaining
-	state.Asked = append(state.Asked, newAsked)
-
-	return state
-}
-
-
-type GuessRequest struct {
-	GuessID   int    `json:"guess_id,omitempty"`
-	GuessName string `json:"guess_name,omitempty"`
-}
-
-func NormalizeName(name string) string {
-	return strings.ToLower(strings.TrimSpace(name))
-}
-
-func ApplyGuess(
-	state SessionState,
-	idx GameIndex,
-	req GuessRequest,
-) SessionState {
-	if state.Status != "playing" {
-		return state
-	}
-
-	isCorrect := false
-
-	secret, ok := FindGameByID(idx, state.SecretID)
-	if !ok {
-		return state
-	}
-
-	if req.GuessID != 0 {
-		if req.GuessID == state.SecretID {
-			isCorrect = true
-		}
+	if template.CheckString != nil {
+		answer = template.CheckString(secretGame, value)
+	} else if template.CheckBool != nil {
+		answer = template.CheckBool(secretGame)
 	} else {
-		if NormalizeName(req.GuessName) == NormalizeName(secret.Name) {
-			isCorrect = true
+		// No logic defined: treat as false and do not change remaining IDs.
+		return state, false
+	}
+
+	filtered := make([]int, 0, len(state.RemainingIDs))
+
+	for _, id := range state.RemainingIDs {
+		game := idx.Games[id]
+
+		var match bool
+
+		if template.CheckString != nil {
+			match = template.CheckString(game, value)
+		} else if template.CheckBool != nil {
+			match = template.CheckBool(game)
+		}
+
+		if match == answer {
+			filtered = append(filtered, id)
 		}
 	}
 
-	if isCorrect {
-		state.Status = "won"
-		state.RevealGameName = secret.Name
-		return state
+	state.RemainingIDs = filtered
+	return state, answer
+}
+
+// -----------------------------
+// Type builder for UI
+// -----------------------------
+
+// BuildQuestionTypeDefs strips out server-only logic and sends a
+// lightweight description to the frontend.
+func BuildQuestionTypeDefs(templates []QuestionTemplate) []QuestionTypeDef {
+	result := make([]QuestionTypeDef, 0, len(templates))
+
+	for _, t := range templates {
+		def := QuestionTypeDef{
+			ID:       t.ID,
+			Category: t.Category,
+			Values:   t.Values,
+		}
+		result = append(result, def)
 	}
 
-	state.GuessesLeft = state.GuessesLeft - 1
-	if state.GuessesLeft <= 0 {
-		state.Status = "lost"
-		state.RevealGameName = secret.Name
-	}
-
-	return state
+	return result
 }
